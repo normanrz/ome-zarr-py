@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import ome_zarr_models.v06.coordinate_transforms as ozmt
+import ome_zarr_models.v09dev42.coordinate_transforms as ozmt_v09
 import transformnd as tnd
 
 if TYPE_CHECKING:
@@ -20,10 +21,10 @@ VECTOR_FIELD_AXIS = 0
 
 
 def ozmp_tf_to_tnd_spaced(
-    transform: ozmt.AnyTransform,
+    transform: ozmt.AnyTransform | ozmt_v09.AnyTransform,
     zarr_context: str = "",
-    source_cs: ozmt.CoordinateSystem | None = None,
-    target_cs: ozmt.CoordinateSystem | None = None,
+    source_cs: ozmt.CoordinateSystem | ozmt_v09.CoordinateSystem | None = None,
+    target_cs: ozmt.CoordinateSystem | ozmt_v09.CoordinateSystem | None = None,
     coordinate_displacements: dict[str, OMEZarrMultiscale] | None = None,
 ) -> tnd.Spaced:
     """
@@ -33,6 +34,8 @@ def ozmp_tf_to_tnd_spaced(
         UnsupportedTransformation
             Transformation cannot be recreated in transformnd, or is lacking coordinate system information.
     """
+    if isinstance(transform, ozmt_v09.Transform):
+        transform = transform._to_v06()
     if coordinate_displacements is None:
         coordinate_displacements = dict()
     if transform.input is None or transform.output is None:
@@ -115,7 +118,7 @@ def _setup_vectorfield_args(
 
 
 def _ozmp_tf_to_tnd(
-    transform: ozmt.AnyTransform,
+    transform: ozmt.AnyTransform | ozmt_v09.AnyTransform,
     zarr_context: str,
     source_ndim: int | None,
     target_ndim: int | None,
@@ -133,6 +136,9 @@ def _ozmp_tf_to_tnd(
             Transformation cannot be recreated in transformnd.
     """
     import numpy as np
+
+    if isinstance(transform, ozmt_v09.Transform):
+        transform = transform._to_v06()
 
     # Example for an affine transformation (this will depend on the actual structure of AnyTransform)
     if isinstance(transform, ozmt.Affine):
@@ -278,7 +284,9 @@ def _set_or_none(it: Sequence[int] | None) -> set[int] | None:
     return set(it)
 
 
-def _get_ndim(cs: ozmt.CoordinateSystem | None) -> int | None:
+def _get_ndim(
+    cs: ozmt.CoordinateSystem | ozmt_v09.CoordinateSystem | None,
+) -> int | None:
     if cs is None:
         return None
     return len(cs.axes)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import transformnd as tnd
 import zarr
@@ -12,6 +12,24 @@ from ome_zarr_models.v06.coordinate_transforms import (
     CoordinateSystem,
 )
 from ome_zarr_models.v06.scene import SceneAttrs
+from ome_zarr_models.v09dev42.coordinate_transforms import (
+    AnyTransform as AnyTransformV09Dev42,
+)
+from ome_zarr_models.v09dev42.coordinate_transforms import (
+    CoordinateSystem as CoordinateSystemV09Dev42,
+)
+from ome_zarr_models.v09dev42.coordinate_transforms import (
+    Transform as TransformV09Dev42,
+)
+from ome_zarr_models.v09dev42.coordinate_transforms import (
+    transform_from_v06,
+)
+from ome_zarr_models.v09dev42.scene import (
+    BaseSceneAttrs as BaseSceneAttrsV09Dev42,
+)
+from ome_zarr_models.v09dev42.scene import (
+    SceneAttrs as SceneAttrsV09Dev42,
+)
 from zarr.storage import StoreLike
 
 from .image import OMEZarrMultiscale
@@ -27,8 +45,8 @@ class OMEZarrScene:
     def __init__(
         self,
         images: list[OMEZarrMultiscale] | dict[str, OMEZarrMultiscale],
-        coordinate_transformations: Sequence[AnyTransform],
-        coordinate_systems: Sequence[CoordinateSystem] = (),
+        coordinate_transformations: Sequence[AnyTransform | AnyTransformV09Dev42],
+        coordinate_systems: Sequence[CoordinateSystem | CoordinateSystemV09Dev42] = (),
         coordinate_displacements: dict[str, OMEZarrMultiscale] | None = None,
     ):
         """
@@ -77,9 +95,17 @@ class OMEZarrScene:
         self.coordinate_displacements = coordinate_displacements
 
         # metadata is the single source of truth
+        normalized_cs = tuple(
+            cs._to_v06() if isinstance(cs, CoordinateSystemV09Dev42) else cs
+            for cs in coordinate_systems
+        )
+        normalized_tf = tuple(
+            tf._to_v06() if isinstance(tf, TransformV09Dev42) else tf
+            for tf in coordinate_transformations
+        )
         self._metadata = SceneAttrs(
-            coordinateSystems=tuple(coordinate_systems),
-            coordinateTransformations=tuple(coordinate_transformations),
+            coordinateSystems=normalized_cs,
+            coordinateTransformations=normalized_tf,
         )
 
         self._graph = self._setup_graph()
@@ -89,8 +115,16 @@ class OMEZarrScene:
         return tuple(self._metadata.coordinateSystems or ())
 
     @coordinate_systems.setter
-    def coordinate_systems(self, value: Sequence[CoordinateSystem]) -> None:
-        self._metadata = self._metadata.model_copy(update={"coordinateSystems": value})
+    def coordinate_systems(
+        self, value: Sequence[CoordinateSystem | CoordinateSystemV09Dev42]
+    ) -> None:
+        normalized = tuple(
+            cs._to_v06() if isinstance(cs, CoordinateSystemV09Dev42) else cs
+            for cs in value
+        )
+        self._metadata = self._metadata.model_copy(
+            update={"coordinateSystems": normalized}
+        )
 
     @property
     def coordinate_transformations(self) -> tuple[AnyTransform, ...]:
@@ -98,10 +132,14 @@ class OMEZarrScene:
 
     @coordinate_transformations.setter
     def coordinate_transformations(
-        self, value: Sequence[AnyTransform] | list[dict[str, Any]]
+        self,
+        value: Sequence[AnyTransform | AnyTransformV09Dev42] | list[dict[str, Any]],
     ) -> None:
+        normalized = tuple(
+            tf._to_v06() if isinstance(tf, TransformV09Dev42) else tf for tf in value
+        )
         self._metadata = self._metadata.model_copy(
-            update={"coordinateTransformations": value}
+            update={"coordinateTransformations": normalized}
         )
 
     @property
@@ -226,7 +264,11 @@ class OMEZarrScene:
         return g
 
     def to_ome_zarr(
-        self, store: StoreLike, overwrite: bool = False, compute: bool = True
+        self,
+        store: StoreLike,
+        overwrite: bool = False,
+        compute: bool = True,
+        version: Literal["0.6", "0.9dev42"] = "0.6",
     ) -> list:
         """
         Write scene to OME-Zarr format.
@@ -241,9 +283,14 @@ class OMEZarrScene:
         compute: bool
             If True, compute any lazy operations on write of each image.
             Otherwise return a list of delayed operations that can be computed later.
+        version: Literal["0.6", "0.9dev42"]
+            OME-Zarr specification version to write. Defaults to "0.6".
 
         """
         import shutil
+
+        if version not in ("0.6", "0.9dev42"):
+            raise ValueError(f"Unsupported OME-Zarr scene version: {version}")
 
         if overwrite and os.path.exists(str(store)):
             # Clear the store if it already exists and we're not doing incremental writes
@@ -264,9 +311,14 @@ class OMEZarrScene:
             # Write the image
             subgroup = zarr_group.create_group(img_path, overwrite=overwrite)
             delayed += img.to_ome_zarr(
-                subgroup, overwrite=True, version="0.6", compute=compute
+                subgroup, overwrite=True, version=version, compute=compute
             )
 
+        ct_group_name = (
+            "coordinate_transformations"
+            if version == "0.9dev42"
+            else "coordinateTransformations"
+        )
         for disp_path, disp_img in (self.coordinate_displacements or {}).items():
             # Skip if already written (incremental mode)
             if not overwrite and disp_path in zarr_group:
@@ -274,16 +326,33 @@ class OMEZarrScene:
 
             # Write the displacement image
             subgroup = zarr_group.create_group(
-                f"coordinateTransformations/{disp_path}", overwrite=overwrite
+                f"{ct_group_name}/{disp_path}", overwrite=overwrite
             )
             delayed += disp_img.to_ome_zarr(
-                subgroup, overwrite=True, version="0.6", compute=compute
+                subgroup, overwrite=True, version=version, compute=compute
             )
 
         # Always update scene metadata
-        metadata_dict = self.metadata.model_dump(exclude_none=True)
-
-        zarr_group.attrs["ome"] = {"scene": metadata_dict, "version": "0.6"}
+        if version == "0.9dev42":
+            scene_v09 = SceneAttrsV09Dev42(
+                coordinate_systems=(
+                    tuple(
+                        CoordinateSystemV09Dev42._from_v06(cs)
+                        for cs in self.metadata.coordinateSystems
+                    )
+                    if self.metadata.coordinateSystems is not None
+                    else None
+                ),
+                coordinate_transformations=tuple(
+                    transform_from_v06(tf)
+                    for tf in self.metadata.coordinateTransformations
+                ),
+            )
+            metadata_dict = scene_v09.model_dump(exclude_none=True)
+            zarr_group.attrs["ome"] = {"scene": metadata_dict, "version": "0.9dev42"}
+        else:
+            metadata_dict = self.metadata.model_dump(exclude_none=True)
+            zarr_group.attrs["ome"] = {"scene": metadata_dict, "version": "0.6"}
 
         return delayed
 
@@ -306,22 +375,41 @@ class OMEZarrScene:
         else:
             zarr_group = zarr.open(store, mode="r")
 
-        # load coordinateTransformations array data, if it exists
-        if "coordinateTransformations" in zarr_group:
+        ome_attrs = cast(dict[str, Any], zarr_group.attrs.get("ome", {}))
+        version = ome_attrs.get("version", "0.6")
+
+        if version == "0.9dev42":
+            ct_group_name = "coordinate_transformations"
+            scene_metadata_v09 = BaseSceneAttrsV09Dev42.model_validate(ome_attrs)
+            transformations: tuple[AnyTransform, ...] = tuple(
+                t._to_v06()
+                for t in scene_metadata_v09.scene.coordinate_transformations
+            )
+            coordinate_systems: tuple[CoordinateSystem, ...] | None = (
+                tuple(
+                    cs._to_v06()
+                    for cs in scene_metadata_v09.scene.coordinate_systems
+                )
+                if scene_metadata_v09.scene.coordinate_systems is not None
+                else None
+            )
+        else:
+            ct_group_name = "coordinateTransformations"
+            scene_metadata = BaseSceneAttrs.model_validate(ome_attrs)
+            transformations = scene_metadata.scene.coordinateTransformations
+            coordinate_systems = scene_metadata.scene.coordinateSystems
+
+        # load coordinateTransformations / coordinate_transformations array data, if it exists
+        if ct_group_name in zarr_group:
             coordinate_displacements = {}
-            for disp_path in zarr_group["coordinateTransformations"].group_keys():
-                disp_group = zarr_group["coordinateTransformations"][disp_path]
+            for disp_path in zarr_group[ct_group_name].group_keys():
+                disp_group = zarr_group[ct_group_name][disp_path]
                 disp_img = cast(
                     OMEZarrMultiscale, OMEZarrMultiscale.from_ome_zarr(disp_group)
                 )
                 coordinate_displacements[disp_path] = disp_img
         else:
             coordinate_displacements = None
-
-        # Load scene metadata
-        scene_metadata = BaseSceneAttrs.model_validate(zarr_group.attrs.get("ome", {}))
-        transformations = scene_metadata.scene.coordinateTransformations
-        coordinate_systems = scene_metadata.scene.coordinateSystems
 
         # Load all image subgroups, keyed by their zarr path
         images = {}

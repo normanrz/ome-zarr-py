@@ -141,18 +141,17 @@ def _validate_well_images(
 def _validate_plate_acquisitions(
     acquisitions: list[dict], fmt: Format = CurrentFormat()
 ) -> list[dict]:
-    VALID_KEYS = [
-        "id",
-        "name",
-        "maximumfieldcount",
-        "description",
-        "starttime",
-        "endtime",
-    ]
+    VALID_KEYS = fmt.plate_acquisition_keys
 
     for acquisition in acquisitions:
         if not isinstance(acquisition, dict):
             raise TypeError(f"{acquisition} must be a dictionary")
+        for old_key, new_key in fmt.deprecated_plate_acquisition_keys.items():
+            if old_key in acquisition:
+                raise ValueError(
+                    f"Key '{old_key}' is not valid in OME-Zarr {fmt.version}; "
+                    f"use '{new_key}' instead."
+                )
         if any(e not in VALID_KEYS for e in acquisition):
             LOGGER.debug("%s contains unspecified keys", acquisition)
         if "id" not in acquisition:
@@ -181,12 +180,21 @@ def _validate_datasets(
 ) -> list[dict]:
     if datasets is None or len(datasets) == 0:
         raise ValueError("Empty datasets list")
+    ct_key = fmt.coordinate_transformations_key
     transformations = []
     for dataset in datasets:
         if isinstance(dataset, dict):
             if not dataset.get("path"):
                 raise ValueError("no 'path' in dataset")
-            transformation = dataset.get("coordinateTransformations")
+            if (
+                fmt.version == "0.9dev42"
+                and "coordinateTransformations" in dataset
+            ):
+                raise ValueError(
+                    "Key 'coordinateTransformations' is not valid in OME-Zarr 0.9dev42; "
+                    "use 'coordinate_transformations' instead."
+                )
+            transformation = dataset.get(ct_key)
             # transformation may be None for < 0.4 - validated below
             if transformation is not None:
                 transformations.append(transformation)
@@ -519,7 +527,7 @@ def write_plate_metadata(
     if field_count is not None:
         plate["field_count"] = field_count
     if acquisitions is not None:
-        plate["acquisitions"] = _validate_plate_acquisitions(acquisitions)
+        plate["acquisitions"] = _validate_plate_acquisitions(acquisitions, fmt=fmt)
 
     if fmt.version in ("0.1", "0.2", "0.3", "0.4"):
         plate["version"] = fmt.version
@@ -703,7 +711,7 @@ def write_image(
     dask_delayed_jobs = multiscale.to_ome_zarr(
         group=group,
         storage_options=storage_options,
-        version=cast(Literal["0.6", "0.5", "0.4"], fmt.version),
+        version=cast(Literal["0.9dev42", "0.6", "0.5", "0.4"], fmt.version),
         compute=compute,
         overwrite=True,
     )
@@ -882,8 +890,9 @@ def _write_pyramid_to_zarr(
         len(pyramid[0].shape), len(datasets), coordinate_transformations
     )
     if coordinate_transformations is not None:
+        ct_key = fmt.coordinate_transformations_key
         for dataset, transform in zip(datasets, coordinate_transformations):
-            dataset["coordinateTransformations"] = transform
+            dataset[ct_key] = transform
 
     write_multiscales_metadata(
         group,
@@ -934,17 +943,34 @@ def write_label_metadata(
     group, fmt = check_group_fmt(group, fmt)
     label_group = group[name]
     image_label_metadata = {**metadata}
+    if fmt.version == "0.9dev42":
+        for entry in (colors or []) + (properties or []):
+            if isinstance(entry, dict) and "label-value" in entry:
+                raise ValueError(
+                    "Key 'label-value' is not valid in OME-Zarr 0.9dev42; "
+                    "use 'label_value' instead."
+                )
     if colors is not None:
         image_label_metadata["colors"] = colors
     if properties is not None:
         image_label_metadata["properties"] = properties
-    image_label_metadata["version"] = fmt.version
+    if fmt.version != "0.9dev42":
+        image_label_metadata["version"] = fmt.version
 
     label_list = get_metadata(group).get("labels", [])
-    label_list.append(name)
+    if name not in label_list:
+        label_list.append(name)
 
-    add_metadata(group, {"labels": label_list}, fmt=fmt)
-    add_metadata(label_group, {"image-label": image_label_metadata}, fmt=fmt)
+    if fmt.version == "0.9dev42":
+        add_metadata(group, {"version": fmt.version, "labels": label_list}, fmt=fmt)
+        add_metadata(
+            label_group,
+            {"version": fmt.version, fmt.image_label_key: image_label_metadata},
+            fmt=fmt,
+        )
+    else:
+        add_metadata(group, {"labels": label_list}, fmt=fmt)
+        add_metadata(label_group, {fmt.image_label_key: image_label_metadata}, fmt=fmt)
 
 
 def get_metadata(group: zarr.Group | str) -> dict:
@@ -1110,7 +1136,7 @@ def write_multiscale_labels(
         axes_units=axes_units,
         coordinate_transformations=coordinate_transformations,
         storage_options=storage_options,
-        version=cast(Literal["0.6", "0.5", "0.4"], fmt.version),
+        version=cast(Literal["0.9dev42", "0.6", "0.5", "0.4"], fmt.version),
         name=name,
         compute=compute,
         **metadata,
@@ -1243,7 +1269,12 @@ def write_labels(
     if method is None:
         method = Methods.NEAREST
 
-    image_label = metadata.get("image-label")
+    if fmt.version == "0.9dev42" and "image-label" in metadata:
+        raise ValueError(
+            "Key 'image-label' is not valid in OME-Zarr 0.9dev42; "
+            "use 'image_label' instead."
+        )
+    image_label = metadata.get(fmt.image_label_key)
 
     if coordinate_transformations is not None:
         msg = (
@@ -1265,7 +1296,7 @@ def write_labels(
     dask_delayed_jobs = multiscales.to_ome_zarr(
         group=sub_group,
         storage_options=storage_options,
-        version=cast(Literal["0.6", "0.5", "0.4"], fmt.version),
+        version=cast(Literal["0.9dev42", "0.6", "0.5", "0.4"], fmt.version),
         compute=compute,
         overwrite=True,
     )

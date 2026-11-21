@@ -117,7 +117,9 @@ def test_additional_transforms(tmp_path, image_dims):
         )
 
 
-@pytest.mark.parametrize("version", ("0.4", "0.5", "0.6"), ids=["V04", "V05", "V06"])
+@pytest.mark.parametrize(
+    "version", ("0.4", "0.5", "0.6", "0.9dev42"), ids=["V04", "V05", "V06", "V09Dev42"]
+)
 def test_image_class_versions(tmp_path, image_dims, version):
     """
     Check that the class-based interface correctly handles different OME-Zarr versions
@@ -316,7 +318,9 @@ def test_image_class_writer_storage_options(tmp_path, image_dims, storage_option
         assert first_chunk == _retuple(expected, nd_array.shape)
 
 
-@pytest.mark.parametrize("version", ["0.4", "0.5", "0.6"], ids=["V04", "V05", "V06"])
+@pytest.mark.parametrize(
+    "version", ["0.4", "0.5", "0.6", "0.9dev42"], ids=["V04", "V05", "V06", "V09Dev42"]
+)
 def test_image_class_writer_labels(tmp_path, image_dims, version):
     """
     Labels written alongside an image can be read back.
@@ -335,14 +339,14 @@ def test_image_class_writer_labels(tmp_path, image_dims, version):
 
     grp_path = (
         tmp_path / "v3" / "test"
-        if version.startswith(("0.5", "0.6"))
+        if version.startswith(("0.5", "0.6", "0.9"))
         else tmp_path / "test"
     )
     ms.to_ome_zarr(group=str(grp_path), version=version, overwrite=True)
 
     # Check if the labels group exists and contains the expected label name.
     label_group_attrs = zarr.open(f"{grp_path}/labels", mode="r").attrs
-    if version == "0.5" or version.startswith("0.6"):
+    if version in ("0.5", "0.9dev42") or version.startswith("0.6"):
         label_group_attrs = label_group_attrs["ome"]
     assert "labels" in label_group_attrs
     assert labels_name in label_group_attrs["labels"]
@@ -373,7 +377,9 @@ def test_bad_image_label_metadata():
         labels_multiscales.image_label = label_dict
 
 
-@pytest.mark.parametrize("version", ["0.4", "0.5", "0.6"], ids=["V04", "V05", "V06"])
+@pytest.mark.parametrize(
+    "version", ["0.4", "0.5", "0.6", "0.9dev42"], ids=["V04", "V05", "V06", "V09Dev42"]
+)
 @pytest.mark.parametrize(
     "shape",
     [(256, 256), (32, 256, 256), (2, 32, 256, 256), (1, 2, 1, 256, 256)],
@@ -405,7 +411,7 @@ def test_image_class_writer_transformations(tmp_path, shape, version):
 
     grp_path = (
         tmp_path / "v3" / "test"
-        if version.startswith(("0.5", "0.6"))
+        if version.startswith(("0.5", "0.6", "0.9"))
         else tmp_path / "test"
     )
     ms.to_ome_zarr(group=str(grp_path), version=version, overwrite=True)
@@ -425,6 +431,9 @@ def test_image_class_writer_transformations(tmp_path, shape, version):
                     assert tf["scale"][axes.index(d)] == axes_scale[axes.index(d)]
                 elif version.startswith("0.6"):
                     tf = ds["coordinateTransformations"][0]["transformations"][0]
+                    assert tf["scale"][axes.index(d)] == axes_scale[axes.index(d)]
+                elif version == "0.9dev42":
+                    tf = ds["coordinate_transformations"][0]["transformations"][0]
                     assert tf["scale"][axes.index(d)] == axes_scale[axes.index(d)]
             continue
 
@@ -453,6 +462,8 @@ def test_image_class_writer_transformations(tmp_path, shape, version):
             cts = ds["coordinateTransformations"]
         elif version.startswith("0.6"):
             cts = ds["coordinateTransformations"][0]["transformations"]
+        elif version == "0.9dev42":
+            cts = ds["coordinate_transformations"][0]["transformations"]
         assert len(cts) == 2
         transf = cts[0]
         assert transf["type"] == "scale"

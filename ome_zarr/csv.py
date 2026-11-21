@@ -104,6 +104,8 @@ def dict_to_zarr(
 
     root = zarr.open_group(zarr_path)
     root_attrs = root.attrs.asdict()
+    if "ome" in root_attrs:
+        root_attrs = root_attrs["ome"]
     plate_attrs = root_attrs.get("plate", None)
     multiscales = "multiscales" in root_attrs
     if plate_attrs is None and not multiscales:
@@ -122,7 +124,16 @@ def dict_to_zarr(
     for path_to_labels in labels_paths:
         label_group = zarr.open_group(path_to_labels)
         attrs = label_group.attrs.asdict()
-        properties = attrs.get("image-label", {}).get("properties")
+        is_v3 = "ome" in attrs
+        ome_attrs = attrs["ome"] if is_v3 else attrs
+        version = ome_attrs.get("version")
+        image_label_key = "image_label" if version == "0.9dev42" else "image-label"
+        if version == "0.9dev42" and "image-label" in ome_attrs:
+            raise ValueError(
+                "Key 'image-label' is not valid in OME-Zarr 0.9dev42; "
+                "use 'image_label' instead."
+            )
+        properties = ome_attrs.get(image_label_key, {}).get("properties")
         if properties is None:
             continue
 

@@ -25,6 +25,7 @@ def format_implementations() -> Iterator["Format"]:
     """
     Return an instance of each format implementation, newest to oldest.
     """
+    yield FormatV09Dev42()
     yield FormatV05()
     yield FormatV04()
     yield FormatV03()
@@ -78,18 +79,51 @@ class Format(ABC):
     def init_channels(self) -> None:  # pragma: no cover
         raise NotImplementedError()
 
+    @property
+    def coordinate_transformations_key(self) -> str:
+        return "coordinateTransformations"
+
+    @property
+    def coordinate_systems_key(self) -> str:
+        return "coordinateSystems"
+
+    @property
+    def image_label_key(self) -> str:
+        return "image-label"
+
+    @property
+    def label_value_key(self) -> str:
+        return "label-value"
+
+    @property
+    def plate_acquisition_keys(self) -> tuple[str, ...]:
+        return (
+            "id",
+            "name",
+            "maximumfieldcount",
+            "description",
+            "starttime",
+            "endtime",
+        )
+
+    @property
+    def deprecated_plate_acquisition_keys(self) -> Mapping[str, str]:
+        return {}
+
     def _get_metadata_version(self, metadata: dict) -> str | None:
         """
         Checks the metadata dict for a version
 
-        Returns the version of the first object found in the metadata,
-        checking for 'multiscales', 'plate', 'well' etc
+        Returns the top-level 'version' if present (v0.5+ under 'ome'),
+        otherwise checks 'multiscales', 'plate', 'well', 'image-label', etc.
         """
+        if "version" in metadata:
+            return metadata.get("version")
         multiscales = metadata.get("multiscales", [])
         if multiscales:
             dataset = multiscales[0]
             return dataset.get("version", None)
-        for name in ["plate", "well", "image-label"]:
+        for name in ["plate", "well", "image-label", "image_label"]:
             obj = metadata.get(name)
             if obj:
                 return obj.get("version", None)
@@ -382,6 +416,123 @@ class FormatV05(FormatV04):
     def chunk_key_encoding(self) -> dict[str, str]:
         # this is default for Zarr v3. Could return None?
         return {"name": "default", "separator": "/"}
+
+
+class FormatV09Dev42(FormatV05):
+    """
+    RFC-15 snake_case metadata naming format (version 0.9dev42).
+    """
+
+    REQUIRED_PLATE_WELL_KEYS: Mapping[str, type] = {
+        "path": str,
+        "row_index": int,
+        "column_index": int,
+    }
+
+    @property
+    def version(self) -> str:
+        return "0.9dev42"
+
+    @property
+    def coordinate_transformations_key(self) -> str:
+        return "coordinate_transformations"
+
+    @property
+    def coordinate_systems_key(self) -> str:
+        return "coordinate_systems"
+
+    @property
+    def image_label_key(self) -> str:
+        return "image_label"
+
+    @property
+    def label_value_key(self) -> str:
+        return "label_value"
+
+    @property
+    def plate_acquisition_keys(self) -> tuple[str, ...]:
+        return (
+            "id",
+            "name",
+            "maximum_field_count",
+            "description",
+            "start_time",
+            "end_time",
+        )
+
+    @property
+    def deprecated_plate_acquisition_keys(self) -> Mapping[str, str]:
+        return {
+            "maximumfieldcount": "maximum_field_count",
+            "starttime": "start_time",
+            "endtime": "end_time",
+        }
+
+    def generate_well_dict(
+        self, well: str, rows: list[str], columns: list[str]
+    ) -> dict:
+        row, column = well.split("/")
+        if row not in rows:
+            raise ValueError("%s is not defined in the list of rows", row)
+        row_index = rows.index(row)
+        if column not in columns:
+            raise ValueError("%s is not defined in the list of columns", column)
+        column_index = columns.index(column)
+        return {
+            "path": str(well),
+            "row_index": row_index,
+            "column_index": column_index,
+        }
+
+    def validate_well_dict(
+        self, well: dict, rows: list[str], columns: list[str]
+    ) -> None:
+        for old_key, new_key in (
+            ("rowIndex", "row_index"),
+            ("columnIndex", "column_index"),
+        ):
+            if old_key in well:
+                raise ValueError(
+                    f"Key '{old_key}' is not valid in OME-Zarr {self.version}; "
+                    f"use '{new_key}' instead."
+                )
+        FormatV01.validate_well_dict(self, well, rows, columns)
+        if len(well["path"].split("/")) != 2:
+            raise ValueError("%s path must exactly be composed of 2 groups", well)
+        row, column = well["path"].split("/")
+        if row not in rows:
+            raise ValueError("%s is not defined in the plate rows", row)
+        if well["row_index"] != rows.index(row):
+            raise ValueError("Mismatching row index for %s", well)
+        if column not in columns:
+            raise ValueError("%s is not defined in the plate columns", column)
+        if well["column_index"] != columns.index(column):
+            raise ValueError("Mismatching column index for %s", well)
+
+    def validate_coordinate_transformations(
+        self,
+        ndim: int,
+        nlevels: int,
+        coordinate_transformations: list[list[dict[str, Any]]] | None = None,
+    ) -> None:
+        if coordinate_transformations is not None:
+            deprecated_types = {
+                "byDimension": "by_dimension",
+                "mapAxis": "map_axis",
+                "projectAxis": "project_axis",
+            }
+            for transforms in coordinate_transformations:
+                if isinstance(transforms, list):
+                    for t in transforms:
+                        if isinstance(t, dict) and t.get("type") in deprecated_types:
+                            old_t = t["type"]
+                            raise ValueError(
+                                f"Transform type '{old_t}' is not valid in OME-Zarr "
+                                f"{self.version}; use '{deprecated_types[old_t]}' instead."
+                            )
+        super().validate_coordinate_transformations(
+            ndim, nlevels, coordinate_transformations
+        )
 
 
 CurrentFormat = FormatV05

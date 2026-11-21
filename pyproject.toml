@@ -31,7 +31,7 @@ dependencies = [
     "toolz",
     "rangehttpserver",
     "transformnd>=0.9.2,<0.10.0",
-    "ome-zarr-models>=1.8.1",
+    "ome-zarr-models @ git+https://github.com/normanrz/ome-zarr-models-py.git@rfc-15-snake-case",
     "Deprecated",
 ]
 

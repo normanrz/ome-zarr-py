@@ -47,6 +47,11 @@ class Node:
         self.post_nodes: list[Node] = []
 
         # TODO: this should be some form of plugin infra over subclasses
+        if zarr.version == "0.9dev42" and "image-label" in zarr.root_attrs:
+            raise ValueError(
+                "Key 'image-label' is not valid in OME-Zarr 0.9dev42; "
+                "use 'image_label' instead."
+            )
         if Labels.matches(zarr):
             self.specs.append(Labels(self))
         if Label.matches(zarr):
@@ -206,12 +211,14 @@ class Label(Spec):
     @staticmethod
     def matches(zarr: ZarrLocation) -> bool:
         """If label-specific metadata is present, then return true."""
-        return bool("image-label" in zarr.root_attrs)
+        return bool(zarr.fmt.image_label_key in zarr.root_attrs)
 
     def __init__(self, node: Node) -> None:
         super().__init__(node)
 
-        image_label = self.lookup("image-label", {})
+        image_label_key = self.zarr.fmt.image_label_key
+        label_value_key = self.zarr.fmt.label_value_key
+        image_label = self.lookup(image_label_key, {})
 
         image = image_label.get("source", {}).get("image", None)
         parent_zarr = None
@@ -231,8 +238,13 @@ class Label(Spec):
         color_list = image_label.get("colors", [])
         if color_list:
             for color in color_list:
+                if self.zarr.version == "0.9dev42" and "label-value" in color:
+                    raise ValueError(
+                        "Key 'label-value' is not valid in OME-Zarr 0.9dev42; "
+                        "use 'label_value' instead."
+                    )
                 try:
-                    label_value = color["label-value"]
+                    label_value = color[label_value_key]
                     rgba = color.get("rgba", None)
                     if rgba:
                         rgba = [x / 255 for x in rgba]
@@ -249,9 +261,14 @@ class Label(Spec):
         props_list = image_label.get("properties", [])
         if props_list:
             for props in props_list:
-                label_val = props["label-value"]
+                if self.zarr.version == "0.9dev42" and "label-value" in props:
+                    raise ValueError(
+                        "Key 'label-value' is not valid in OME-Zarr 0.9dev42; "
+                        "use 'label_value' instead."
+                    )
+                label_val = props[label_value_key]
                 properties[label_val] = dict(props)
-                del properties[label_val]["label-value"]
+                del properties[label_val][label_value_key]
 
         # TODO: a metadata transform should be provided by specific impls.
         name = self.zarr.basename()
@@ -277,12 +294,33 @@ class Multiscales(Spec):
         super().__init__(node)
 
         multiscales = self.lookup("multiscales", [])
-        version = multiscales[0].get(
-            "version", "0.1"
-        )  # should this be matched with Format.version?
+        version = multiscales[0].get("version") or self.lookup("version", "0.1")
         datasets = multiscales[0]["datasets"]
+        if version == "0.6":
+            fmt = self.zarr.fmt
+        else:
+            fmt = format_from_version(version)
+        if fmt.version == "0.9dev42":
+            for old_key, new_key in (
+                ("coordinateSystems", "coordinate_systems"),
+                ("coordinateTransformations", "coordinate_transformations"),
+            ):
+                if old_key in multiscales[0]:
+                    raise ValueError(
+                        f"Key '{old_key}' is not valid in OME-Zarr 0.9dev42; "
+                        f"use '{new_key}' instead."
+                    )
+            for d in datasets:
+                if "coordinateTransformations" in d:
+                    raise ValueError(
+                        "Key 'coordinateTransformations' is not valid in "
+                        "OME-Zarr 0.9dev42; use 'coordinate_transformations' instead."
+                    )
         axes = multiscales[0].get("axes")
-        fmt = format_from_version(version)
+        if axes is None and fmt.coordinate_systems_key in multiscales[0]:
+            coord_systems = multiscales[0][fmt.coordinate_systems_key]
+            if coord_systems:
+                axes = coord_systems[0].get("axes")
         # Raises ValueError if not valid
         axes_obj = Axes(axes, fmt=fmt)
         node.metadata["axes"] = axes_obj.to_list()
@@ -290,9 +328,10 @@ class Multiscales(Spec):
         node.metadata["name"] = multiscales[0].get("name")
         paths = [d["path"] for d in datasets]
         self.datasets: list[str] = paths
-        transformations = [d.get("coordinateTransformations") for d in datasets]
+        ct_key = fmt.coordinate_transformations_key
+        transformations = [d.get(ct_key) for d in datasets]
         if any(trans is not None for trans in transformations):
-            node.metadata["coordinateTransformations"] = transformations
+            node.metadata[ct_key] = transformations
         LOGGER.info("datasets %s", datasets)
 
         for resolution in self.datasets:
@@ -482,6 +521,24 @@ class Plate(Spec):
         """
         self.plate_data = self.lookup("plate", {})
         LOGGER.info("plate_data: %s", self.plate_data)
+        if self.zarr.version == "0.9dev42":
+            for well in self.plate_data.get("wells", []):
+                for old_key, new_key in (
+                    ("rowIndex", "row_index"),
+                    ("columnIndex", "column_index"),
+                ):
+                    if old_key in well:
+                        raise ValueError(
+                            f"Key '{old_key}' is not valid in OME-Zarr 0.9dev42; "
+                            f"use '{new_key}' instead."
+                        )
+            for acq in self.plate_data.get("acquisitions", []) or []:
+                for old_key, new_key in self.zarr.fmt.deprecated_plate_acquisition_keys.items():
+                    if old_key in acq:
+                        raise ValueError(
+                            f"Key '{old_key}' is not valid in OME-Zarr 0.9dev42; "
+                            f"use '{new_key}' instead."
+                        )
         self.rows = self.plate_data.get("rows")
         self.columns = self.plate_data.get("columns")
         self.row_names = [row["name"] for row in self.rows]

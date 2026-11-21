@@ -162,7 +162,12 @@ def find_multiscales(path_to_zattrs):
     elif "scene" in zattrs:
         # use first input image as the representative for the scene
         path_to_zarr = path_to_zattrs
-        for ct in zattrs["scene"].get("coordinateTransformations", []):
+        ct_key = (
+            "coordinate_transformations"
+            if zattrs.get("version") == "0.9dev42"
+            else "coordinateTransformations"
+        )
+        for ct in zattrs["scene"].get(ct_key, []):
             input_path = ct.get("input", {}).get("path")
             if input_path is not None:
                 path_to_zarr = path_to_zattrs / input_path
@@ -338,8 +343,11 @@ def download(input_path: str, output_dir: str = ".") -> None:
         # ponytail: scene coordinate systems/axes vary by version; the
         # ome_zarr_models-backed OMEZarrScene already handles this round-trip.
         name = Path(location.path).name or "scene.zarr"
+        scene_version = location.root_attrs.get("version", "0.6")
         scene = OMEZarrScene.from_ome_zarr(location.store)
-        scene.to_ome_zarr(Path(output_dir) / name, overwrite=True)
+        scene.to_ome_zarr(
+            Path(output_dir) / name, overwrite=True, version=scene_version
+        )
         return
 
     reader = Reader(location)
